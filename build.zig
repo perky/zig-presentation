@@ -30,6 +30,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add custom build options.
+    const build_with_ultralight = b.option(bool, "ultralight", "Build with Ultralight to render HTML") orelse false;
+    const exe_options = b.addOptions();
+    exe.addOptions("build_options", exe_options);
+    exe_options.addOption(bool, "ultralight", build_with_ultralight);
+
     const nanovg_module = build_nanovg.module(b);
     exe.addModule("nanovg", nanovg_module);
     build_nanovg.addCSource(exe);
@@ -37,21 +43,34 @@ pub fn build(b: *std.Build) void {
     const glfw_lib = build_glfw.buildLib(b, target, optimize);
     exe.linkLibrary(glfw_lib);
     build_glfw.addCSource(exe);
-    exe.linkLibC();
 
-    exe.addIncludePath(thisDir() ++ "/lib/harfbuzz/zig-out/include");
-    exe.addLibraryPath(thisDir() ++ "/lib/harfbuzz/zig-out/lib");
-    exe.linkSystemLibrary("harfbuzz");
+    if (build_with_ultralight) {
+        exe.addIncludePath(thisDir() ++ "/lib/ultralight/include");
+        exe.addLibraryPath(thisDir() ++ "/lib/ultralight");
+        exe.addRPath(thisDir() ++ "/lib/ultralight");
+        exe.linkSystemLibrary("Ultralight");
+        exe.linkSystemLibrary("UltralightCore");
+        exe.linkSystemLibrary("WebCore");
+        exe.linkSystemLibrary("AppCore");
+    }
+
+    // exe.addIncludePath(thisDir() ++ "/lib/harfbuzz/zig-out/include");
+    // exe.addLibraryPath(thisDir() ++ "/lib/harfbuzz/zig-out/lib");
+    // exe.linkSystemLibrary("harfbuzz");
+
+    exe.linkLibC();
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
-    exe.install();
+    // exe.install(); // zig 0.11.0-dev.1914
+    b.installArtifact(exe); // zig 0.11.0-dev.3301
 
     // This *creates* a RunStep in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
-    const run_cmd = exe.run();
+    // const run_cmd = exe.run();  // zig 0.11.0-dev.1914
+    const run_cmd = b.addRunArtifact(exe);  // zig 0.11.0-dev.3301
 
     // By making the run step depend on the install step, it will be run from the
     // installation directory rather than directly from within the cache directory.

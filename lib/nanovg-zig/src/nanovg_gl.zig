@@ -454,7 +454,8 @@ const FragUniforms = struct {
         frag.outer_color = premulColor(paint.outer_color);
 
         if (scissor.extent[0] < -0.5 or scissor.extent[1] < -0.5) {
-            std.mem.set(f32, &frag.scissor_mat, 0);
+            // std.mem.set(f32, &frag.scissor_mat, 0); // zig 0.11.0-dev.1914
+            @memset(&frag.scissor_mat, 0); // zig 0.11.0-dev.3301
             frag.scissor_extent[0] = 1;
             frag.scissor_extent[1] = 1;
             frag.scissor_scale[0] = 1;

@@ -7,6 +7,10 @@ const ImageMode = types.Image.Mode;
 const Slide = types.Slide;
 const SlideSlot = types.Slide.Slot;
 const Presentation = types.Presentation;
+
+const use_html = @import("html_render.zig").use_ultralight;
+const HtmlLoadInterface = @import("html_render.zig").HtmlLoadInterface;
+
 const Allocator = std.mem.Allocator;
 const NodeList = std.ArrayList(NodeWrap);
 const Error = mecha.Error;
@@ -41,10 +45,12 @@ pub const Node = union(enum) {
         bodySlot, bodySize, bodyAlign, bodyColor, 
         titleSlot, titleSize, titleAlign, titleColor,
         codeEditorSlot, codeEditorSize, codeEditorColor,
-        codeEditor
+        codeEditor, 
+        htmlFile, htmlBodyStart, htmlBodyEnd,
+        jumpHere,
     };
     pub const GlobalParamLabel = enum {
-        makeSlot, makeColor, defaultBackground, showNotes
+        makeSlot, makeColor, defaultBackground, showNotes, debugMode
     };
     pub const Image = struct { path: []const u8, slot: []const u8, mode: ImageMode };
     pub const NamedColor = struct { name: []const u8, color: []u8 };
@@ -58,7 +64,13 @@ fn logErr(comptime err_fmt: []const u8, args: anytype) void {
     std.log.err("Line {d}: {s}", .{ g_current_parse_line, g_current_parse_str });
 }
 
-pub fn parsePresentdownFile(arena: Allocator, image_cache: *ImageCache, color_presets: *StringArrayHashMap([3]u8), path: []const u8) !Presentation {
+pub fn parsePresentdownFile(
+    arena: Allocator, 
+    image_cache: *ImageCache, 
+    color_presets: *StringArrayHashMap([3]u8), 
+    html_loader: HtmlLoadInterface,
+    path: []const u8,
+) !Presentation {
     var file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
     defer file.close();
 
@@ -70,18 +82,28 @@ pub fn parsePresentdownFile(arena: Allocator, image_cache: *ImageCache, color_pr
         const alloc_line = try arena.dupe(u8, line);
         g_current_parse_str = alloc_line;
         const parse_result = parseLine(arena, alloc_line) catch |err| {
-            std.log.err("Error on line {d}.", .{g_current_parse_line});
+            std.log.err("Error {} on line {d}.", .{err, g_current_parse_line});
             return err;
         };
         const node_wrap: NodeWrap = .{ .node = parse_result.value, .original_str = alloc_line };
         try nodes.append(node_wrap);
         g_current_parse_line += 1;
     }
-    return try initPresentation(arena, image_cache, color_presets, nodes.items);
+    var presentation = initPresentation(arena, image_cache, color_presets, html_loader, nodes.items) catch |err| {
+        std.log.err("Error {} on line {d}.", .{err, g_current_parse_line});
+        return err;
+    };
+    return presentation;
 }
 
-fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *StringArrayHashMap([3]u8), nodes: []const NodeWrap) !Presentation {
-    var presentation = Presentation.init(arena);
+fn initPresentation(
+    arena: Allocator, 
+    image_cache: *ImageCache, 
+    color_presets: *StringArrayHashMap([3]u8), 
+    html_loader: HtmlLoadInterface,
+    nodes: []const NodeWrap,
+) !Presentation {
+    var presentation = Presentation.init(arena, html_loader);
     try presentation.slots.put("default_body", Slide.default_body_slot);
     try presentation.slots.put("default_title", Slide.default_title_slot);
     try presentation.slots.put("fullscreen", Slide.fullscreen_slot);
@@ -157,7 +179,10 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
 
     var next_body_slot_name: ?[]const u8 = null;
     var next_body_style: Slide.TextStyle = Slide.default_body_style;
+    var wants_new_body: bool = false;
     var do_not_show_next_body: bool = false;
+    var read_html_body: bool = false;
+    var html_body_arr = ArrayList(u8).init(arena);
     g_current_parse_line = 1;
     for (nodes) |node_wrap| {
         const node = node_wrap.node;
@@ -173,6 +198,7 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
                 },
                 .defaultBackground => presentation.default_background = try getter.background(param.value),
                 .showNotes => presentation.show_notes = (param.value.number >= 1),
+                .debugMode => presentation.debug_mode = (param.value.number >= 1),
             },
             .title => |_title| {
                 var slide = Slide.init(arena, _title);
@@ -187,6 +213,12 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
                     return error.InvalidBody;
                 }
                 var current_slide: *Slide = getLastItemPtr(Slide, presentation.slides).?;
+                
+                if (read_html_body) {
+                    try html_body_arr.appendSlice(node.body);
+                    continue;
+                }
+
                 if (do_not_show_next_body) {
                     do_not_show_next_body = false;
                     var append_slide = Slide.init(arena, current_slide.title);
@@ -199,9 +231,10 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
                     }
                     try presentation.slides.append(append_slide);
                 }
+
                 current_slide = getLastItemPtr(Slide, presentation.slides).?;
                 const slide_body_len = current_slide.bodies.items.len;
-                const b_create_new_body: bool = (next_body_slot_name != null or slide_body_len == 0);
+                const b_create_new_body: bool = (next_body_slot_name != null or slide_body_len == 0 or wants_new_body);
                 var current_body: *Slide.Body = undefined;
                 if (b_create_new_body) { // Create new body.
                     const slot = blk: {
@@ -215,6 +248,7 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
                     try current_slide.bodies.append(body);
                     next_body_slot_name = null;
                     current_body = getLastItemPtr(Slide.Body, current_slide.bodies).?;
+                    wants_new_body = false;
                 } else { // Get last created body.
                     current_body = getLastItemPtr(Slide.Body, current_slide.bodies).?;
                 }
@@ -256,7 +290,7 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
                     .bodySlot => next_body_slot_name = param.value.string,
                     .bodySize => next_body_style.size = param.value.number,
                     .bodyAlign => next_body_style.align_h = std.meta.stringToEnum(Slide.HAlign, param.value.string).?,
-                    .bodyColor =>  next_body_style.color = try getter.color(param.value),
+                    .bodyColor => next_body_style.color = try getter.color(param.value),
                     .titleSlot => current_slide.title_slot = try getter.slot(param.value.string),
                     .titleSize => current_slide.title_style.size = param.value.number,
                     .titleAlign => {
@@ -280,6 +314,40 @@ fn initPresentation(arena: Allocator, image_cache: *ImageCache, color_presets: *
                     .codeEditorColor => current_slide.code_editor_style.color = try getter.color(param.value),
                     .append => do_not_show_next_body = true,
                     .note => try current_slide.notes.appendSlice(param.value.string),
+                    .htmlFile => {
+                        if (!use_html) {
+                            std.log.err("Cannot use @htmlFile, no html renderer compiled.", .{});
+                            return error.InvalidParam;
+                        }
+
+                        const path = param.value.string;
+                        var html_file = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
+                        defer html_file.close();
+                        const html_data = try html_file.readToEndAllocOptions(
+                            arena, 
+                            10_000_000, 
+                            null, 
+                            @alignOf(u8),
+                            0,
+                        );
+                        current_slide.html_body = html_data;
+                    },
+                    .htmlBodyStart => {
+                        if (!use_html) {
+                            std.log.err("Cannot use @htmlBodyStart, no html renderer compiled.", .{});
+                            return error.InvalidParam;
+                        }
+                        read_html_body = true;
+                    },
+                    .htmlBodyEnd => {
+                        if (!use_html) {
+                            std.log.err("Cannot use @htmlBodyEnd, no html renderer compiled.", .{});
+                            return error.InvalidParam;
+                        }
+                        read_html_body = false;
+                        current_slide.html_body = try html_body_arr.toOwnedSliceSentinel(0);
+                    },
+                    .jumpHere => presentation.slide_index = presentation.slides.items.len - 1,
                 }
             },
         }
@@ -316,15 +384,31 @@ pub fn toJsonObject(comptime T: type) *const fn (Allocator, anytype) Error!T {
     return struct {
         fn func(allocator: Allocator, data: anytype) Error!T {
             const trim_data = std.mem.trimRight(u8, data, "\n");
-            var stream = json.TokenStream.init(trim_data);
-            var result = json.parse(T, &stream, .{ .allocator = allocator }) catch |err| {
-                std.log.err("Failed to parse JSON {} => {s}", .{err, data});
+            // var stream = json.TokenStream.init(trim_data);
+            // var result = json.parse(T, &stream, .{ .allocator = allocator }) catch |err| {
+            var result = json.parseFromSlice(T, allocator, trim_data, .{ .ignore_unknown_fields = true }) catch |err| {
+                std.log.err("Failed to parse JSON into type {s} {} => {s}", .{@typeName(T), err, data});
                 return Error.OtherError;
             };
             return result;
         }
     }.func;
 }
+
+pub fn toUnionViaJson(comptime U: type, comptime T: type, comptime tag: []const u8) *const fn (Allocator, anytype) Error!T {
+    const json = std.json;
+    return struct {
+        fn func(allocator: Allocator, data: anytype) Error!T {
+            const trim_data = std.mem.trimRight(u8, data, "\n");
+            var result = json.parseFromSlice(T, allocator, trim_data, .{ .ignore_unknown_fields = true }) catch |err| {
+                std.log.err("Failed to parse JSON into type {s} {} => {s}", .{@typeName(T), err, data});
+                return Error.OtherError;
+            };
+            return @unionInit(U, tag, result);
+        }
+    }.func;
+}
+
 
 const ascii = mecha.ascii;
 const utf8 = mecha.utf8;
@@ -358,14 +442,6 @@ const label = mecha.asStr(combine(.{
 }));
 const float_lit = convert(mecha.toFloat(f32), mecha.rest);
 
-const common_param_value = withErr("invalid value", oneOf(.{
-    convert(toParamValue("string"), eos),
-    convert(toParamValue("string"), quoted_string),
-    convert(toParamValue("vec3"), color_lit),
-    convert(toParamValue("number"), float_lit),
-    convert(toJsonObject(Node.ParamValue), braced_object),
-}));
-
 const comment_line = combine(.{
     discard(at_lit),
     discard(mecha.ascii.char('c')),
@@ -374,23 +450,88 @@ const comment_line = combine(.{
     discard(mecha.rest)
 });
 
+fn globalParamParser(comptime id: []const u8, comptime param_parser: anytype) mecha.Parser(Node.GlobalParam) {
+    return mecha.map(mecha.toStruct(Node.GlobalParam), combine(.{
+        convert(mecha.toEnum(Node.GlobalParamLabel), mecha.asStr(mecha.string(id))),
+        skip_whitespace,
+        param_parser,
+    }));
+}
+
+fn globalParamParserOneOf(comptime id: []const u8, comptime parser_list: anytype) mecha.Parser(Node.GlobalParam) {
+    return mecha.map(mecha.toStruct(Node.GlobalParam), combine(.{
+        convert(mecha.toEnum(Node.GlobalParamLabel), mecha.asStr(mecha.string(id))),
+        skip_whitespace,
+        oneOf(parser_list),
+    }));
+}
+
+fn slideParamParser(comptime id: []const u8, comptime param_parser: anytype) mecha.Parser(Node.SlideParam) {
+    return mecha.map(mecha.toStruct(Node.SlideParam), combine(.{
+        convert(mecha.toEnum(Node.SlideParamLabel), mecha.asStr(mecha.string(id))),
+        skip_whitespace,
+        param_parser,
+    }));
+}
+
+fn slideParamParserOneOf(comptime id: []const u8, comptime param_list: anytype) mecha.Parser(Node.SlideParam) {
+    return mecha.map(mecha.toStruct(Node.SlideParam), combine(.{
+        convert(mecha.toEnum(Node.SlideParamLabel), mecha.asStr(mecha.string(id))),
+        skip_whitespace,
+        oneOf(param_list),
+    }));
+}
+
+fn jsonParser(comptime T: type) mecha.Parser(T) {
+    return convert(toJsonObject(T), braced_object);
+}
+
+fn paramValueParser(comptime tag: []const u8, comptime parser: anytype) mecha.Parser(Node.ParamValue) {
+    return convert(toParamValue(tag), parser);
+}
+
+const empty_param_value = paramValueParser("string", eos);
+const number_param_value = paramValueParser("number", float_lit);
+const color_param_value = paramValueParser("vec3", color_lit);
+const image_param_value = paramValueParser("image", jsonParser(Node.Image));
+const string_param_value = paramValueParser("string", quoted_string);
+
 const bangat_param = combine(.{
     discard(at_lit),
     discard(bang_lit),
-    mecha.map(mecha.toStruct(Node.GlobalParam), combine(.{
-        withErr("invalid command", convert(mecha.toEnum(Node.GlobalParamLabel), label)),
-        skip_whitespace,
-        common_param_value
-    }))
+    oneOf(.{
+        globalParamParser("makeSlot", paramValueParser("make_slot", jsonParser(SlideSlot))),
+        globalParamParser("makeColor", paramValueParser("named_color", jsonParser(Node.NamedColor))),
+        globalParamParserOneOf("defaultBackground", .{ color_param_value, string_param_value }),
+        globalParamParser("showNotes", number_param_value),
+        globalParamParser("debugMode", number_param_value),
+    }),
 });
 
 const at_param = combine(.{
     discard(at_lit),
-    mecha.map(mecha.toStruct(Node.SlideParam), combine(.{
-        withErr("invalid command", convert(mecha.toEnum(Node.SlideParamLabel), label)),
-        skip_whitespace,
-        common_param_value
-    }))
+    oneOf(.{
+        slideParamParser("image", image_param_value),
+        slideParamParser("append", empty_param_value),
+        slideParamParserOneOf("background", .{ color_param_value, string_param_value }),
+        slideParamParser("note", string_param_value),
+        slideParamParser("bodySlot", string_param_value),
+        slideParamParser("bodySize", number_param_value),
+        slideParamParser("bodyAlign", string_param_value),
+        slideParamParser("bodyColor", color_param_value),
+        slideParamParser("titleSlot", string_param_value),
+        slideParamParser("titleSize", number_param_value),
+        slideParamParser("titleAlign", string_param_value),
+        slideParamParser("titleColor", color_param_value),
+        slideParamParser("codeEditorSlot", string_param_value),
+        slideParamParser("codeEditorSize", number_param_value),
+        slideParamParser("codeEditorColor", color_param_value),
+        slideParamParser("codeEditor", string_param_value),
+        slideParamParser("htmlFile", string_param_value),
+        slideParamParser("htmlBodyStart", empty_param_value),
+        slideParamParser("htmlBodyEnd", empty_param_value),
+        slideParamParser("jumpHere", empty_param_value),
+    }),
 });
 
 const hex_byte = mecha.int(u8, .{

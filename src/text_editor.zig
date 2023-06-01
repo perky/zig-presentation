@@ -309,6 +309,34 @@ pub fn drawBuffer(self: *const Editor, renderer: RendererInterface) void {
     }
 }
 
+pub fn drawLineNumbers(self: *const Editor, renderer: RendererInterface) void {
+    var draw_cursor = Cursor{};
+    var line_number_buf: [8]u8 = undefined;
+
+    for (self.buf, 0..) |char, i| {
+        draw_cursor.idx = i;
+        if (char == 0 or i == self.eof) break;
+        if (char == '\n' or i == 0) {
+            const line_number = std.fmt.bufPrint(&line_number_buf, "{d}:", .{ draw_cursor.row + 1 }) catch "?:";
+            const ln_len = @intCast(i32, line_number.len);
+            draw_cursor.col = 0;
+
+            for (line_number, 0..) |ln_char, ln_i| {
+                var rect = renderer.cursor_rect_fn(
+                    @intCast(i32, draw_cursor.col) - 1 - ln_len + @intCast(i32, ln_i), 
+                    @intCast(i32, draw_cursor.row), 
+                    renderer.userdata,
+                );
+                renderer.draw_glyph_fn(ln_char, rect.x, rect.y, renderer.userdata);
+            }
+
+            draw_cursor.row += 1;
+            continue;
+        }
+        draw_cursor.col += 1;
+    }
+}
+
 pub fn castUserdata(comptime T: type, userdata: *const anyopaque) *const T {
     @setRuntimeSafety(false);
     return @ptrCast(*const T, @alignCast(@alignOf(*const T), userdata));

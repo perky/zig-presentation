@@ -73,7 +73,7 @@ pub fn drawPresentation(vg: Nanovg, presentation: Presentation, time: f32, size:
         // Draw bodies.
         for (slide.bodies.items) |body| {
             vg.fontSize(body.style.size);
-            vg.textAlign(.{ .horizontal = .left, .vertical = .baseline });
+            vg.textAlign(.{ .horizontal = .left, .vertical = .top });
             vg.fillColor(colorFrom3u8(body.style.color));
             var fbs = std.io.fixedBufferStream(body.text.items);
             var body_reader = fbs.reader();
@@ -82,7 +82,7 @@ pub fn drawPresentation(vg: Nanovg, presentation: Presentation, time: f32, size:
             var y: f32 = 0;
             while (try body_reader.readUntilDelimiterOrEof(&body_line_buf, '\n')) |line| {
                 if (line.len == 0) {
-                    y += body.style.size;
+                    y += body.style.size * 1.5;
                     continue;
                 }
                 const align_h: rich_text.TextHorizontalAlign = switch (body.style.align_h) {
@@ -93,9 +93,8 @@ pub fn drawPresentation(vg: Nanovg, presentation: Presentation, time: f32, size:
                 };
                 const m_result = rich_text.drawTextMultiline(vg, rect[2], rect[0], rect[1] + y, align_h, .word, line);
                 if (m_result) |result| {
-                    y += (result.rect[3] * 1.0) + (result.line_height * 0.2);
+                    y += (result.rect[3] * 1.0) + (result.line_height * 0.4);
                 }
-                
             }
         }
     }
@@ -104,13 +103,38 @@ pub fn drawPresentation(vg: Nanovg, presentation: Presentation, time: f32, size:
         const x = f_win_width * 0.05;
         const w = f_win_width * 0.9;
         const y = f_win_height * 0.9;
-        const noteSize = 20;
+        const noteSize = 10;
         vg.fontSize(noteSize);
         vg.textAlign(.{ .horizontal = .left, .vertical = .baseline });
         vg.fillColor(Nanovg.rgb(0,0,0));
         _ = rich_text.drawTextMultiline(vg, w, x+3, y+3, .center, .word, slide.notes.items);
-        vg.fillColor(Nanovg.rgb(255, 255, 255));
+        vg.fillColor(Nanovg.rgb(120, 120, 120));
         _ = rich_text.drawTextMultiline(vg, w, x, y, .center, .word, slide.notes.items);
+    }
+
+    if (presentation.debug_mode) {
+        var it = presentation.slots.iterator();
+        var idx: f32 = 0;
+        const count = @intToFloat(f32, presentation.slots.count());
+        while (it.next()) |kv| {
+            const mod_time = @mod(time * 1.0, count);
+            if (mod_time >= idx and mod_time < (idx + 1)) {
+                const name = kv.key_ptr.*;
+                const slot = kv.value_ptr.*;
+                const box_rect = getRectFromSlot(slot, size);
+                vg.beginPath();
+                vgRect(vg, box_rect);
+                vg.strokeColor(Nanovg.rgba(255, 0, 0, 255));
+                vg.stroke();
+
+                vg.fontFace("mono");
+                vg.fontSize(10);
+                vg.textAlign(.{ .horizontal = .left, .vertical = .top });
+                vg.fillColor(Nanovg.rgba(255, 0, 0, 255));
+                _ = vg.text(box_rect[0], box_rect[1], name);
+            }
+            idx += 1;
+        }
     }
 }
 
@@ -180,7 +204,7 @@ pub fn customStyleCallback(vg: Nanovg, userdata: ?*anyopaque, style_name: []cons
         .wiggle => {
             const speed: f32 = 4.0;
             const freq: f32 = 0.7;
-            const amp: f32 = 0.4;
+            const amp: f32 = 0.1;
             var x: f32 = x_cursor;
             for (text, 0..) |char, i| {
                 const phase = @intToFloat(f32, i);
@@ -278,6 +302,8 @@ pub fn editorDraw(vg: Nanovg, code_editor: *TextEditor, time: f32, bounds: [4]f3
     vg.translate(params.x, params.y);
     vg.fillColor(params.text_color);
     code_editor.drawBuffer(code_editor_renderer);
+    vg.fillColor(Nanovg.rgba(40, 40, 40, 255));
+    code_editor.drawLineNumbers(code_editor_renderer);
     code_editor.drawCursor(code_editor_renderer);
 }
 
@@ -399,10 +425,12 @@ pub fn vgImage(vg: Nanovg, x: f32, y: f32, w: f32, h: f32, image: Nanovg.Image, 
         }
     };
     var img_pattern = vg.imagePattern(x, y, ptn_size[0], ptn_size[1], 0, image, 1.0);
+    vg.scissor(x, y, ptn_size[0], ptn_size[1]);
     vg.beginPath();
     vg.rect(x, y, w, h);
     vg.fillPaint(img_pattern);
     vg.fill();
+    vg.resetScissor();
 }
 
 pub fn vgSpinner(vg: Nanovg, cx: f32, cy: f32, r: f32, t: f32) void {

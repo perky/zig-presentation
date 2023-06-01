@@ -12,6 +12,12 @@ Alternatively you can use command `zig build run -- presentation.md`.
 Read `presentation.md` for how to create a presentation file.
 
 # Dependencies
-- Zig 0.11.x
+- Zig 0.11.0-dev.3323+
 - Glfw 3.x (included in lib)
 - Nanovg-zig (included in lib)
+
+# Optional Dependencies
+- Ultralight (html renderer) (https://ultralig.ht/)
+  - Add shared libraries to `lib/ultralight/`.
+  - Add ultralight resources folder to `./`.
+  - Use flag `-Dultralight=true` when compiling.

@@ -79,19 +79,36 @@ fn nullCustomStyleCallback(_: Nanovg, _: ?*anyopaque, _: []const u8, _: []const 
 const MemoryPool = struct {
     chunks: []RichTextChunk,
     tokens: []RichTextToken,
+    text: []u8,
+    text_write: usize = 0,
 };
 var g_default_memory_pool_chunks: [2048]RichTextChunk = undefined;
 var g_default_memory_pool_tokens: [2048]RichTextToken = undefined;
-var g_memory_pool: MemoryPool = .{ .chunks = &g_default_memory_pool_chunks, .tokens = &g_default_memory_pool_tokens };
+var g_default_memory_pool_text: [500_000]u8 = undefined;
+var g_memory_pool: MemoryPool = .{ 
+    .chunks = &g_default_memory_pool_chunks, 
+    .tokens = &g_default_memory_pool_tokens,
+    .text = &g_default_memory_pool_text,
+};
 pub fn allocateMemoryPool(allocator: std.mem.Allocator, size_bytes: usize) !void {
-    const max_chunks = ((size_bytes / 2) / @sizeOf(RichTextChunk));
-    const max_tokens = ((size_bytes / 2) / @sizeOf(RichTextToken));
-    g_memory_pool = MemoryPool{ .chunks = try allocator.alloc(RichTextChunk, max_chunks), .tokens = try allocator.alloc(RichTextToken, max_tokens) };
+    const max_chunks = ((size_bytes / 3) / @sizeOf(RichTextChunk));
+    const max_tokens = ((size_bytes / 3) / @sizeOf(RichTextToken));
+    const max_text = ((size_bytes / 3) / @sizeOf(RichTextToken));
+    g_memory_pool = MemoryPool{ 
+        .chunks = try allocator.alloc(RichTextChunk, max_chunks), 
+        .tokens = try allocator.alloc(RichTextToken, max_tokens),
+        .text = try allocator.alloc(u8, max_text),
+    };
 }
 pub fn freeMemoryPool(allocator: std.mem.Allocator) void {
     allocator.free(g_memory_pool.chunks);
     allocator.free(g_memory_pool.tokens);
-    g_memory_pool = MemoryPool{ .chunks = &g_default_memory_pool_chunks, .tokens = &g_default_memory_pool_tokens };
+    allocator.free(g_memory_pool.text);
+    g_memory_pool = MemoryPool{ 
+        .chunks = &g_default_memory_pool_chunks, 
+        .tokens = &g_default_memory_pool_tokens,
+        .text = &g_default_memory_pool_text,
+    };
 }
 
 // Types.
@@ -166,7 +183,7 @@ pub fn drawText(vg: Nanovg, line_width: f32, x: f32, y: f32, h_align: TextHorizo
     vg.save();
     defer vg.restore();
     vg.translate(x, y);
-    vg.textAlign(.{ .horizontal = .left, .vertical = .baseline });
+    vg.textAlign(.{ .horizontal = .left, .vertical = .top });
     vg.beginPath();
 
     const default_text_metrics = getTextMetrics(vg);
@@ -852,6 +869,8 @@ pub fn tokenizeRichText(text: []const u8, tokens: []RichTextToken) TokenizeError
     var tag_start: usize = 0;
     var tag_end: usize = 0;
 
+    g_memory_pool.text_write = 0;
+
     // The actual tokenizing logic. It loops through each character in the text,
     // and transitions the state machine and/or emits a token.
     for (text, 0..) |char, i| {
@@ -865,7 +884,9 @@ pub fn tokenizeRichText(text: []const u8, tokens: []RichTextToken) TokenizeError
                     state = .close_brace;
                 },
                 newline_char => {
-                    _ = try context.emitToken(.text, text[text_start..i]);
+                    const emit_txt = escapeBraces(text[text_start..i], g_memory_pool.text[g_memory_pool.text_write..]);
+                    g_memory_pool.text_write += emit_txt.len;
+                    _ = try context.emitToken(.text, emit_txt);
                     _ = try context.emitToken(.newline, text[i .. i + 1]);
                     text_start = i + 1;
                 },
@@ -880,14 +901,18 @@ pub fn tokenizeRichText(text: []const u8, tokens: []RichTextToken) TokenizeError
                 tag_close_char => { // "{/..."
                     tag_end = tag_start - 1;
                     if (tag_end > text_start) {
-                        _ = try context.emitToken(.text, text[text_start..tag_end]);
+                        const emit_txt = escapeBraces(text[text_start..tag_end], g_memory_pool.text[g_memory_pool.text_write..]);
+                        g_memory_pool.text_write += emit_txt.len;
+                        _ = try context.emitToken(.text, emit_txt);
                     }
                     state = .close_tag;
                 },
                 else => { // "{..."
                     tag_end = tag_start - 1;
                     if (tag_end > text_start) {
-                        _ = try context.emitToken(.text, text[text_start..tag_end]);
+                        const emit_txt = escapeBraces(text[text_start..tag_end], g_memory_pool.text[g_memory_pool.text_write..]);
+                        g_memory_pool.text_write += emit_txt.len;
+                        _ = try context.emitToken(.text, emit_txt);
                     }
                     state = .inside_tag;
                 },
@@ -947,6 +972,15 @@ pub fn tokenizeRichText(text: []const u8, tokens: []RichTextToken) TokenizeError
         _ = try context.emitToken(.text, text[text_start..]);
     }
     return context.token_count;
+}
+
+fn escapeBraces(original: []const u8, buf: []u8) []const u8 {
+    const r_len_1 = std.mem.replacementSize(u8, original, "{{", "{");
+    _ = std.mem.replace(u8, original, "{{", "{", buf);
+    const r_text_1 = buf[0..r_len_1];
+    const r_len_2 = std.mem.replacementSize(u8, r_text_1, "}}", "}");
+    _ = std.mem.replace(u8, r_text_1, "}}", "}", buf);
+    return buf[0..r_len_2];
 }
 
 // This is the test suite.

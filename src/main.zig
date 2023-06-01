@@ -5,6 +5,7 @@ const Nanovg = vg_lib.Nanovg;
 const rich_text = @import("rich_text.zig");
 const parse = @import("parse.zig");
 const TextEditor = @import("text_editor.zig");
+const html_render = @import("html_render.zig");
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
 const types = @import("types.zig");
@@ -55,14 +56,17 @@ fn loadPresentation() void {
     g_app_state.presentation = parse.parsePresentdownFile(
         g_app_state.arena.allocator(), 
         &g_app_state.image_cache, 
-        &g_app_state.color_presets, 
+        &g_app_state.color_presets,
+        html_render.loaderInterface(g_app_state.html_renderer), 
         g_presentation_path) catch null;
     // Unlink the stderr redirect.
     g_redirect_stderr = null;
     // Output the stuff that was redirected, to stderr.
     if (g_app_state.presentation) |*p| {
-        p.slide_index = pre_slide_index;
-        p.printSlideInfo();
+        if (pre_slide_index != 0) {
+            p.slide_index = pre_slide_index;
+        }
+        p.onSlideChange();
     } else {
         std.log.err("{s}", .{g_app_state.parse_err.items});
     }
@@ -91,9 +95,9 @@ pub fn main() !void {
         g_presentation_path = args[1];
     }
 
-    var parsing_arena = try initFixedArenaAllocator(allocator, 1_000_000);
-    var image_cache_arena = try initFixedArenaAllocator(allocator, 1_000_000);
-    var frame_arena = try initFixedArenaAllocator(allocator, 10_000);
+    var parsing_arena = try initFixedArenaAllocator(allocator, 10_000_000);
+    var image_cache_arena = try initFixedArenaAllocator(allocator, 50_000_000);
+    var frame_arena = try initFixedArenaAllocator(allocator, 1_000_000);
 
     _ = c.glfwSetErrorCallback(glfwErrorCallback);
     if (c.glfwInit() == 0) {
@@ -103,8 +107,11 @@ pub fn main() !void {
 
     var monitor: ?*c.GLFWmonitor = c.glfwGetPrimaryMonitor();
     var video_mode: [*c]const c.GLFWvidmode = c.glfwGetVideoMode(monitor);
-    var window: ?*c.GLFWwindow = c.glfwCreateWindow(video_mode[0].width, video_mode[0].height, "presentation", c.glfwGetPrimaryMonitor(), null);
+    const screen_w = video_mode[0].width;
+    const screen_h = video_mode[0].height;
+    var window: ?*c.GLFWwindow = c.glfwCreateWindow(screen_w, screen_h, "presentation", c.glfwGetPrimaryMonitor(), null);
     g_presentation_window = window;
+    
     if (window == null) {
         c.glfwTerminate();
         std.log.err("Failed to create window.", .{});
@@ -131,6 +138,9 @@ pub fn main() !void {
     g_app_state.image_cache = vg_lib.ImageCache.init(image_cache_arena.allocator(), vg);
     g_app_state.color_presets = std.StringArrayHashMap([3]u8).init(image_cache_arena.allocator());
     rich_text.setCustomStyleCallback(vg_lib.customStyleCallback, &g_app_state);
+    
+    g_app_state.html_renderer = html_render.rendererInit(allocator, @intCast(u32, screen_w), @intCast(u32, screen_h));
+    var html_render_image: ?Nanovg.Image = html_render.rendererMakeImage(g_app_state.html_renderer, vg);
 
     loadPresentation();
 
@@ -154,9 +164,18 @@ pub fn main() !void {
         const win_size = getWindowSize(window);
         c.glClear(c.GL_COLOR_BUFFER_BIT | c.GL_DEPTH_BUFFER_BIT | c.GL_STENCIL_BUFFER_BIT);
         vg.beginFrame(win_size[0], win_size[1], 1.0);
+
         if (g_app_state.presentation) |presentation| {
             try vg_lib.drawPresentation(vg, presentation, @floatCast(f32, g_app_state.time), win_size);
             try vg_lib.drawCompileCodeOutput(vg, frame_arena.allocator(), &g_app_state.compile_code_state, @floatCast(f32, g_app_state.time), win_size);
+
+            const slide = presentation.activeSlidePtr();
+            if (slide.html_body != null) {
+                html_render.rendererUpdate(g_app_state.html_renderer, vg, html_render_image);
+                if (html_render_image) |ri| {
+                    vg_lib.vgImage(vg, 0, 0, win_size[0], win_size[1], ri, .fill);
+                }
+            }
         } else {
             var x_off = @floatCast(f32, g_app_state.time*20);
             vg_lib.vgImage(vg, -x_off, win_size[1] / 2, win_size[0] + x_off, win_size[1] / 2, vg_lib.sad_img, .fit_h);
@@ -166,6 +185,7 @@ pub fn main() !void {
             vg.fillColor(Nanovg.rgb(255, 255, 255));
             vg.textBox(50, 50, win_size[0] - 100, g_app_state.parse_err.items);
         }
+
         _ = frame_arena.reset();
         vg.endFrame();
 
@@ -316,7 +336,8 @@ fn compileCode() !void {
 fn compileCodeThread(code: []const u8, name: []const u8) !void {
     var allocator = std.heap.page_allocator;
     const temp_file_path = try std.fmt.allocPrint(allocator, "./temp_{s}.zig", .{name});
-    var file = try std.fs.cwd().createFile(temp_file_path, std.fs.File.CreateFlags{});
+    defer allocator.free(temp_file_path);
+    var file = try std.fs.cwd().createFile(temp_file_path, .{});
     defer file.close();
     try file.writeAll(code);
 
@@ -348,10 +369,10 @@ fn compileCodeThread(code: []const u8, name: []const u8) !void {
 
     var exec_args = ArrayList([]const u8).init(allocator);
     defer exec_args.deinit();
-    try exec_args.appendSlice(&[_][]const u8{ "zig", "run", temp_file_path, "--" });
+    try exec_args.appendSlice(&[_][]const u8{ "zig", "run", "--color", "off", temp_file_path, "--" });
     try exec_args.appendSlice(args.items);
 
-    var result = try std.ChildProcess.exec(.{ .allocator = allocator, .cwd_dir = std.fs.cwd(), .argv = exec_args.items });
+    var result = try std.ChildProcess.exec(.{ .allocator = allocator, .argv = exec_args.items });
     {
         g_app_state.compile_code_state.mutex.lock();
         defer g_app_state.compile_code_state.mutex.unlock();

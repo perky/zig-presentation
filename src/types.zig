@@ -2,6 +2,7 @@ const std = @import("std");
 const vg_lib = @import("vg.zig");
 const Nanovg = vg_lib.Nanovg;
 const TextEditor = @import("text_editor.zig");
+const html_render = @import("html_render.zig");
 const ArrayList = std.ArrayList;
 const StringArrayHashMap = std.StringArrayHashMap;
 const Allocator = std.mem.Allocator;
@@ -22,6 +23,7 @@ pub const AppState = struct {
     image_cache: vg_lib.ImageCache = undefined,
     color_presets: StringArrayHashMap([3]u8) = undefined,
     parse_err: ArrayList(u8) = undefined,
+    html_renderer: ?*html_render.Renderer = null,
 
     pub const CompileCodeState = struct { 
         mutex: std.Thread.Mutex = .{}, 
@@ -47,24 +49,51 @@ pub const Presentation = struct {
     slide_index: usize = 0,
     default_background: Slide.Background = .{ .color = .{ 0, 0, 0 } },
     show_notes: bool = false,
-    pub fn init(arena: Allocator) Presentation {
+    debug_mode: bool = false,
+    html_loader: html_render.HtmlLoadInterface,
+
+    pub fn init(arena: Allocator, html_loader: html_render.HtmlLoadInterface) Presentation {
         return .{ 
             .slides = ArrayList(Slide).init(arena), 
             .slots = StringArrayHashMap(Slide.Slot).init(arena),
             .code_editors = StringArrayHashMap(TextEditor).init(arena),
+            .html_loader = html_loader,
         };
     }
+
     pub fn nextSlide(self: *Presentation) void {
         self.slide_index +%= 1;
-        self.printSlideInfo();
+        self.onSlideChange();
     }
+
     pub fn previousSlide(self: *Presentation) void {
         self.slide_index -%= 1;
-        self.printSlideInfo();
+        self.onSlideChange();
     }
+
+    pub fn activeSlideIndex(self: *const Presentation) usize {
+        return self.slide_index % self.slides.items.len;
+    }
+
+    pub fn activeSlidePtr(self: *const Presentation) *Slide {
+        return &self.slides.items[self.activeSlideIndex()];
+    }
+
+    pub fn onSlideChange(self: *Presentation) void {
+        self.printSlideInfo();
+        const slide = self.activeSlidePtr();
+        if (html_render.use_ultralight) {
+            if (slide.html_body) |html_body| {
+                self.html_loader.load.?(self.html_loader.context.?, html_body);
+            } else {
+                self.html_loader.load.?(self.html_loader.context.?, "");
+            }
+        }
+    }
+
     pub fn printSlideInfo(self: *Presentation) void {
-        const slide_idx = self.slide_index % self.slides.items.len;
-        const slide = &self.slides.items[slide_idx];
+        const slide_idx = self.activeSlideIndex();
+        const slide = self.activeSlidePtr();
         stdout.print("Slide {d}/{d} # {s}\n", .{slide_idx + 1, self.slides.items.len + 1, slide.title}) catch {};
         if (slide.notes.items.len > 0) {
             stdout.print("Notes: {s}\n", .{slide.notes.items}) catch {};
@@ -89,6 +118,8 @@ pub const Slide = struct {
     code_editor_name: []const u8 = "",
     code_editor_slot: Slot = default_body_slot,
     code_editor_style: TextStyle = default_code_editor_style,
+    html_file: ?[]const u8 = null,
+    html_body: ?[:0]const u8 = null,
     notes: ArrayList(u8),
 
     bodies: ArrayList(Body),
@@ -100,7 +131,7 @@ pub const Slide = struct {
     pub const Slot = struct { name: []const u8, x: f32, y: f32, w: f32, h: f32 };
     pub const HAlign = Nanovg.TextAlign.HorizontalAlign;
 
-    pub const default_title_slot = Slot{ .name = "default_title", .x = 0.1, .y = 0.12, .w = 0.8, .h = 1 };
+    pub const default_title_slot = Slot{ .name = "default_title", .x = 0.1, .y = 0.12, .w = 0.8, .h = 0.05 };
     pub const default_title_style = TextStyle{ .size = 80, .align_h = .left, .color = [_]u8{ 255, 255, 255 } };
     pub const default_body_slot = Slot{ .name = "default_body", .x = 0.1, .y = 0.23, .w = 0.8, .h = 0.6 };
     pub const default_body_style = TextStyle{ .size = 30, .align_h = .left, .color = [_]u8{ 255, 255, 255 } };

@@ -78,9 +78,9 @@ This text will appear in the "left_body" slot.
 This text will appear in the "right_body" slot.
 
 # Images
-@background "images/ribbon.jpg"
+@background "assets/img/ribbon.jpg"
 @bodySlot "left_body"
-@image {"path": "images/bricks.jpg", "slot": "right", "mode": "fill"}
+@image {"path": "assets/img/bricks.jpg", "slot": "right", "mode": "fill"}
 {c:#00ff00}The background can also be set to an image. Most well known image formats are supported.{/c}
 
 You can also put images into the body.
